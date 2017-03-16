@@ -235,4 +235,92 @@ int zip_seek(FILE *stream, const struct zip_entry *entry) {
              fseeko(stream, lfh.file_name_length + lfh.extra_field_length, SEEK_CUR) == 0);
 }
 
+int zip_store(FILE *stream, const char *filename, const void *data, size_t size) {
+    off_t offset = ftell(stream);
+    if (offset == -1)
+        return 1;
+
+    time_t t = time(NULL);
+    struct tm *tm = localtime(&t);
+
+    struct local_file_header lfh = {
+        .signature = 0x04034B50,
+        .version_needed = 10,
+        .flags = 0,
+        .compression_method = 0,
+        .last_mod_file_time = tm->tm_hour << 11 | tm->tm_min << 5 | tm->tm_sec >> 1,
+        .last_mod_file_date = (tm->tm_year - 80) << 9 | (tm->tm_mon + 1) << 5 | tm->tm_mday,
+        .crc_32 = 0,
+        .compressed_size = size,
+        .uncompressed_size = size,
+        .file_name_length = strlen(filename),
+        .extra_field_length = 0,
+    };
+
+    fwrite(&lfh, sizeof(lfh), 1, stream);
+    fwrite(filename, lfh.file_name_length, 1, stream);
+    fwrite(data, size, 1, stream);
+
+    return 0;
+}
+
+int zip_finalize(FILE *stream) {
+    off_t offset = 0;
+    struct local_file_header lfh;
+    char filename[1024];
+
+    struct end_of_central_dir_record eocdr = {
+        .signature = 0x06054B50,
+        .disk_number = 0,
+        .cdr_disk_number = 0,
+        .disk_num_entries = 0,
+        .num_entries = 0,
+        .cdr_size = 0,
+        .cdr_offset = ftello(stream),
+        .ZIP_file_comment_length = 0,
+    };
+
+    while (fseeko(stream, offset, SEEK_SET) == 0 &&
+           fread(&lfh, sizeof(lfh), 1, stream) &&
+           lfh.signature == 0x04034B50 &&
+           lfh.file_name_length < sizeof(filename) &&
+           fread(filename, lfh.file_name_length, 1, stream)) {
+
+        printf("F %.*s\n", lfh.file_name_length, filename);
+        struct central_dir_header cdh = {
+            .signature = 0x02014B50,
+            .version = 10,
+            .version_needed = lfh.version_needed,
+            .flags = lfh.flags,
+            .compression_method = lfh.compression_method,
+            .last_mod_file_time = lfh.last_mod_file_time,
+            .last_mod_file_date = lfh.last_mod_file_date,
+            .crc_32 = lfh.crc_32,
+            .compressed_size = lfh.compressed_size,
+            .uncompressed_size = lfh.uncompressed_size,
+            .file_name_length = lfh.file_name_length,
+            .extra_field_length = 0,
+            .file_comment_length = 0,
+            .disk_number_start = 0,
+            .internal_file_attributes = 0,
+            .external_file_attributes = 0,
+            .local_header_offset = offset,
+        };
+        fseeko(stream, 0, SEEK_END);
+        fwrite(&cdh, sizeof(cdh), 1, stream);
+        fwrite(filename, lfh.file_name_length, 1, stream);
+
+        ++eocdr.num_entries;
+        ++eocdr.disk_num_entries;
+
+        offset += sizeof(lfh) + lfh.file_name_length + lfh.compressed_size;
+    }
+
+    fseeko(stream, 0, SEEK_END);
+    eocdr.cdr_size = ftello(stream) - eocdr.cdr_offset;
+    fwrite(&eocdr, sizeof(eocdr), 1, stream);
+
+    return 0;
+}
+
 #endif // NOZIP_IMPLEMENTATION
